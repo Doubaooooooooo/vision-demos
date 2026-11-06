@@ -1,0 +1,5 @@
+# Video data and model files are not in git.
+data/
+*.task
+.venv-golf-swing/
+__pycache__/
