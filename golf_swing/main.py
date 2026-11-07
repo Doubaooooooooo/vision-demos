@@ -64,6 +64,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import config as cfg
 from src import analysis as analysis_mod
+from src import clubhead as clubhead_mod
 from src import pose as pose_mod
 from src import render as render_mod
 
@@ -101,7 +102,8 @@ def ffmpeg_mux_audio(video_no_audio: Path, source: Path, out: Path):
 
 
 def process_clip(video_path: Path, out_dir: Path, model_path=None,
-                   takeaway_frame=None, takeaway_time_s=None):
+                   takeaway_frame=None, takeaway_time_s=None,
+                   with_clubhead=False):
     t0 = time.time()
     log_lines: list[str] = []
     stem = video_path.stem
@@ -131,6 +133,16 @@ def process_clip(video_path: Path, out_dir: Path, model_path=None,
     trail_len = max(2, int(round(cfg.TRAIL_SECONDS * fps)))
     wrist_pts = [wrist_pixel(lm, width, height) for lm in landmarks]
 
+    # Clubhead trail (face-on clip only): eye-verified anchors + bridged
+    # interpolation; see src/clubhead.py for the honesty notes.
+    clubhead_trail = None
+    if with_clubhead:
+        clubhead_trail = clubhead_mod.build_trail(n_frames)
+        log(f"[{stem}] clubhead: {sum(1 for v in clubhead_trail['measured'].values() if v)}"
+            f" measured / {sum(1 for v in clubhead_trail['measured'].values() if not v)}"
+            f" bridged frames f{clubhead_trail['first_frame']}-"
+            f"{clubhead_trail['last_frame']}", log_lines)
+
     # Pass 2: render, streaming. Two writers: annotated (single) and
     # split-screen (original | annotated). Both at source fps/size.
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -149,7 +161,8 @@ def process_clip(video_path: Path, out_dir: Path, model_path=None,
         lm = landmarks[idx] if idx < len(landmarks) else None
         trail = wrist_pts[max(0, idx - trail_len + 1): idx + 1]
         ann = render_mod.render_frame(
-            frame, lm, width, height, idx, analysis, trail
+            frame, lm, width, height, idx, analysis, trail,
+            clubhead_trail=clubhead_trail,
         )
         ann_w.write(ann)
         split_w.write(np.hstack([frame, ann]))
@@ -194,6 +207,66 @@ def process_clip(video_path: Path, out_dir: Path, model_path=None,
     }
     (clip_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
     (clip_dir / "run.log").write_text("\n".join(log_lines) + "\n")
+    if clubhead_trail is not None:
+        ch = {
+            "clip": video_path.name,
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "method": (
+                "Eye-verified anchors (see src/clubhead.py). Automated "
+                "detection was tried and failed: plain Hough locks onto "
+                "the static red pillar / golf-bag lines; "
+                "background-differencing Hough finds shaft fragments "
+                "whose far endpoint is mid-shaft, not the head; dark-blob "
+                "search is swamped by static dark clutter (trees, pillar "
+                "bolts, '13' sign, golf bag). Frames between anchors are "
+                "linearly interpolated + sliding-quadratic smoothed "
+                "(window 5, as for the basketball ball trail). Drawing: "
+                "SOLID for intervals between two high/medium anchors at "
+                "most 5 frames apart (well constrained); DOTTED for "
+                "everything else. The fast downswing f182-f192 is a "
+                "motion-blur gap: no smoothing is applied there, the "
+                "connector stays linear and dotted, and no head marker "
+                "is drawn inside the gap."
+            ),
+            "first_frame": clubhead_trail["first_frame"],
+            "last_frame": clubhead_trail["last_frame"],
+            "blur_gap_frames": clubhead_trail["blur_gap"],
+            "n_frames": len(clubhead_trail["positions"]),
+            "n_measured": sum(1 for v in clubhead_trail["measured"].values() if v),
+            "n_bridged": sum(1 for v in clubhead_trail["measured"].values() if not v),
+            "n_solid_drawn": sum(1 for v in clubhead_trail["solid"].values() if v),
+            "n_dotted_drawn": sum(1 for v in clubhead_trail["solid"].values() if not v),
+            "per_frame": [
+                {
+                    "frame": f,
+                    "x": clubhead_trail["positions"][f][0],
+                    "y": clubhead_trail["positions"][f][1],
+                    "measured": clubhead_trail["measured"][f],
+                    "confidence": clubhead_trail["confidence"][f],
+                    "drawn_solid": clubhead_trail["solid"][f],
+                }
+                for f in sorted(clubhead_trail["positions"])
+            ],
+            "anchors": clubhead_trail["anchors"],
+            "per_phase": clubhead_mod.phase_counts(
+                clubhead_trail,
+                {**analysis["events"],
+                 "takeaway_frame": analysis.get("takeaway_frame")},
+            ),
+            "caveats": [
+                "Clubhead positions are 2D image-plane pixels, not 3D.",
+                "Only high/medium anchor frames are measured sightings; "
+                "low anchors are blur-streak reads and f190 is inferred "
+                "from the ball launch point, not a sighting.",
+                "The downswing segment f182-f192 is bridged through a "
+                "motion-blur gap: the drawn arc there is a constrained "
+                "interpolation, not a measured path. Do not use it for "
+                "clubhead speed or downswing plane numbers.",
+                "No ball trajectory is drawn in this video: the face-on "
+                "ball had 0 confirmed flight points.",
+            ],
+        }
+        (clip_dir / "clubhead.json").write_text(json.dumps(ch, indent=2))
     log(f"[{stem}] done in {time.time() - t0:.1f}s -> {clip_dir}", log_lines)
     return clip_dir, split_h264, ann_h264, metrics
 
@@ -220,6 +293,9 @@ def main():
     ap.add_argument("--takeaway-time", type=float, default=None,
                     help="eye-verified takeaway time in seconds "
                          "(overrides --takeaway-frame for the tempo math)")
+    ap.add_argument("--clubhead", action="store_true",
+                    help="draw the clubhead trail (src/clubhead.py anchors; "
+                         "face-on clip only)")
     args = ap.parse_args()
     inputs = collect_inputs(Path(args.input))
     if not inputs:
@@ -228,7 +304,8 @@ def main():
         process_clip(video_path, Path(args.out_dir),
                      Path(args.model) if args.model else None,
                      takeaway_frame=args.takeaway_frame,
-                     takeaway_time_s=args.takeaway_time)
+                     takeaway_time_s=args.takeaway_time,
+                     with_clubhead=args.clubhead)
 
 
 if __name__ == "__main__":

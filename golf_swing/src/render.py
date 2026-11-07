@@ -41,6 +41,66 @@ def _draw_trail(frame, hand_trail, color, thickness=3):
                  max(1, int(round(thickness * alpha))), cv2.LINE_AA)
 
 
+# Clubhead trail: magenta, distinct from the amber skeleton and the orange
+# wrist trail. Solid = both endpoints measured (eye-verified sightings);
+# dotted = bridged / interpolated, including the whole fast-downswing blur
+# gap. The trail persists from the takeaway so the full arc is visible.
+CLUBHEAD_COLOR = (255, 0, 255)  # BGR, magenta
+
+
+def _draw_dotted_segment(frame, p0, p1, color, thickness=3, dash=7, gap=6):
+    import math
+    x0, y0 = p0
+    x1, y1 = p1
+    length = math.hypot(x1 - x0, y1 - y0)
+    if length < 1:
+        return
+    ux, uy = (x1 - x0) / length, (y1 - y0) / length
+    d = 0.0
+    while d < length:
+        a = (int(round(x0 + ux * d)), int(round(y0 + uy * d)))
+        b = (int(round(x0 + ux * min(length, d + dash))),
+             int(round(y0 + uy * min(length, d + dash))))
+        cv2.line(frame, a, b, color, thickness, cv2.LINE_AA)
+        d += dash + gap
+
+
+def _draw_clubhead_trail(frame, trail, frame_idx):
+    """Draw the clubhead trail up to the current frame, on the annotated
+    copy only. `trail` is the dict from src.clubhead.build_trail()."""
+    if trail is None:
+        return
+    pos = trail["positions"]
+    measured = trail["measured"]
+    first = trail["first_frame"]
+    if frame_idx < first:
+        return
+    solid = trail.get("solid", {})
+    for f in range(first + 1, min(frame_idx, trail["last_frame"]) + 1):
+        if f not in pos or (f - 1) not in pos:
+            continue
+        p0, p1 = pos[f - 1], pos[f]
+        if solid.get(f) and solid.get(f - 1):
+            cv2.line(frame, p0, p1, CLUBHEAD_COLOR, 3, cv2.LINE_AA)
+        else:
+            _draw_dotted_segment(frame, p0, p1, CLUBHEAD_COLOR, 3)
+    # Current head marker: white-ringed magenta dot + label. Suppressed
+    # inside the fast-downswing blur gap: a marker there would claim a
+    # position the video does not show. The dotted bridge stays.
+    gap = trail.get("blur_gap") or [0, -1]
+    if frame_idx in pos and not (gap[0] <= frame_idx <= gap[1]):
+        p = pos[frame_idx]
+        cv2.circle(frame, p, 9, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.circle(frame, p, 5, CLUBHEAD_COLOR, -1, cv2.LINE_AA)
+        # Label flips to the left of the marker near the right edge.
+        w = frame.shape[1]
+        lx = p[0] + 12 if p[0] < w - 120 else p[0] - 108
+        cv2.putText(frame, "CLUBHEAD", (lx, p[1] - 10),
+                    _FONT, 0.45, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(frame, "CLUBHEAD", (lx, p[1] - 10),
+                    _FONT, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+
+
 def _text(frame, s, org, scale=None, color=(255, 255, 255), thickness=None):
     cv2.putText(frame, s, org, _FONT, scale or cfg.FONT_SCALE, (0, 0, 0),
                 (thickness or cfg.FONT_THICKNESS) + 2, cv2.LINE_AA)
@@ -48,7 +108,8 @@ def _text(frame, s, org, scale=None, color=(255, 255, 255), thickness=None):
                 thickness or cfg.FONT_THICKNESS, cv2.LINE_AA)
 
 
-def render_frame(frame, lm, width, height, frame_idx, analysis, hand_trail):
+def render_frame(frame, lm, width, height, frame_idx, analysis, hand_trail,
+                 clubhead_trail=None):
     """Return a new annotated copy of `frame`."""
     out = frame.copy()
     # Top panel.
@@ -56,6 +117,7 @@ def render_frame(frame, lm, width, height, frame_idx, analysis, hand_trail):
     phase = phase_at_frame(analysis["events"], frame_idx)
     _draw_skeleton(out, lm, width, height)
     _draw_trail(out, hand_trail, cfg.TRAIL_COLOR)
+    _draw_clubhead_trail(out, clubhead_trail, frame_idx)
     _text(out, f"Phase: {phase}", (12, 34))
     tempo = analysis.get("tempo_display") or analysis["tempo_ratio"]
     tempo_s = f"Tempo {tempo}:1" if tempo else "Tempo --"
@@ -69,6 +131,10 @@ def render_frame(frame, lm, width, height, frame_idx, analysis, hand_trail):
         for ev in cfg.SPINE_AT
     )
     _text(out, f"Spine 2D: {spine_s} deg", (12, 90), scale=0.45)
+    # Clubhead legend (only when a clubhead trail is being drawn).
+    if clubhead_trail is not None:
+        _text(out, "Clubhead magenta: solid=measured, dotted=bridged",
+              (12, height - cfg.TIMELINE_HEIGHT - 8), scale=0.42)
     # Bottom timeline: ticks for the 8 events.
     y0 = height - cfg.TIMELINE_HEIGHT
     cv2.rectangle(out, (0, y0), (width, height), (20, 20, 20), -1)
