@@ -284,13 +284,40 @@ def phase_at_frame(events, frame):
     return current
 
 
-def analyse(landmarks, width, height, fps):
+def analyse(landmarks, width, height, fps, takeaway_frame=None,
+              takeaway_time_s=None):
+    """Analyse a swing. takeaway_frame / takeaway_time_s override the
+    backswing start: the hand-height low point ("address") is a stance
+    pose, not the start of the swing — a golfer may stand at address for
+    seconds before moving, and that idle time is not backswing. When an
+    eye-verified takeaway is supplied, backswing is measured from it
+    (takeaway -> top) instead of from address. Spine angles still use
+    the address event frame; only the tempo changes."""
     sig = extract_signals(landmarks, width, height)
     events, notes = segment_phases(sig["hand_height"], fps)
     addr, top, impact = events["address"], events["top"], events["impact"]
-    backswing_s = (top - addr) / fps
-    downswing_s = (impact - top) / fps
-    tempo_ratio = backswing_s / downswing_s if downswing_s > 0 else None
+    if takeaway_frame is not None or takeaway_time_s is not None:
+        if takeaway_time_s is None:
+            takeaway_time_s = takeaway_frame / fps
+        if takeaway_frame is None:
+            takeaway_frame = int(round(takeaway_time_s * fps))
+        # Backswing from the verified takeaway, rounded to 2 dp; tempo
+        # from the rounded backswing so the numbers are self-consistent.
+        backswing_s = round(top / fps - takeaway_time_s, 2)
+        downswing_s = round((impact - top) / fps, 3)
+        tempo_ratio = (round(backswing_s / downswing_s, 2)
+                       if downswing_s > 0 else None)
+        notes.append(
+            f"takeaway override: backswing measured from takeaway "
+            f"f{takeaway_frame} ({takeaway_time_s:.2f}s), not address "
+            f"f{addr} ({addr / fps:.2f}s); idle address time excluded"
+        )
+    else:
+        backswing_s = (top - addr) / fps
+        downswing_s = (impact - top) / fps
+        tempo_ratio = backswing_s / downswing_s if downswing_s > 0 else None
+        backswing_s = round(backswing_s, 3)
+        tempo_ratio = round(tempo_ratio, 2) if tempo_ratio else None
     spine = {
         ev: spine_angle(sig["shoulder_mid"], sig["hip_mid"], events[ev])
         for ev in cfg.SPINE_AT
@@ -298,9 +325,13 @@ def analyse(landmarks, width, height, fps):
     return {
         "events": events,
         "event_times_s": {ev: round(events[ev] / fps, 3) for ev in EVENTS},
-        "backswing_s": round(backswing_s, 3),
-        "downswing_s": round(downswing_s, 3),
-        "tempo_ratio": round(tempo_ratio, 2) if tempo_ratio else None,
+        "takeaway_frame": takeaway_frame,
+        "takeaway_time_s": takeaway_time_s,
+        "backswing_s": backswing_s,
+        "downswing_s": downswing_s,
+        "tempo_ratio": tempo_ratio,
+        # Overlay shows tempo to 1 decimal place ("1.4:1").
+        "tempo_display": f"{tempo_ratio:.1f}" if tempo_ratio else None,
         "spine_angle_2d_deg": {
             ev: (round(v, 1) if v is not None else None) for ev, v in spine.items()
         },

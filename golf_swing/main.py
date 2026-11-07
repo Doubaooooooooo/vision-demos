@@ -100,7 +100,8 @@ def ffmpeg_mux_audio(video_no_audio: Path, source: Path, out: Path):
         raise RuntimeError(f"ffmpeg failed: {r.stderr[-500:]}")
 
 
-def process_clip(video_path: Path, out_dir: Path, model_path=None):
+def process_clip(video_path: Path, out_dir: Path, model_path=None,
+                   takeaway_frame=None, takeaway_time_s=None):
     t0 = time.time()
     log_lines: list[str] = []
     stem = video_path.stem
@@ -113,7 +114,10 @@ def process_clip(video_path: Path, out_dir: Path, model_path=None):
         video_path, model_path
     )
     log(f"[{stem}] frames={n_frames} fps={fps:.2f} size={width}x{height}", log_lines)
-    analysis = analysis_mod.analyse(landmarks, width, height, fps)
+    analysis = analysis_mod.analyse(
+        landmarks, width, height, fps,
+        takeaway_frame=takeaway_frame, takeaway_time_s=takeaway_time_s,
+    )
     log(f"[{stem}] pose coverage: {analysis['pose_coverage']:.2f} "
         f"({analysis['frames_with_pose']}/{n_frames} frames)", log_lines)
     log(f"[{stem}] events: {analysis['event_times_s']}", log_lines)
@@ -169,9 +173,12 @@ def process_clip(video_path: Path, out_dir: Path, model_path=None):
         "n_frames": n_frames,
         "events": analysis["events"],
         "event_times_s": analysis["event_times_s"],
+        "takeaway_frame": analysis.get("takeaway_frame"),
+        "takeaway_time_s": analysis.get("takeaway_time_s"),
         "backswing_s": analysis["backswing_s"],
         "downswing_s": analysis["downswing_s"],
         "tempo_ratio": analysis["tempo_ratio"],
+        "tempo_display": analysis.get("tempo_display"),
         "spine_angle_2d_deg": analysis["spine_angle_2d_deg"],
         "pose_coverage": analysis["pose_coverage"],
         "frames_with_pose": analysis["frames_with_pose"],
@@ -207,13 +214,21 @@ def main():
     ap.add_argument("--out-dir", default=str(cfg.OUTPUT_DIR))
     ap.add_argument("--model", default=None,
                     help="path to pose_landmarker_full.task")
+    ap.add_argument("--takeaway-frame", type=int, default=None,
+                    help="eye-verified takeaway frame: backswing is measured "
+                         "from here, not from the address low point")
+    ap.add_argument("--takeaway-time", type=float, default=None,
+                    help="eye-verified takeaway time in seconds "
+                         "(overrides --takeaway-frame for the tempo math)")
     args = ap.parse_args()
     inputs = collect_inputs(Path(args.input))
     if not inputs:
         raise SystemExit(f"No clips found at {args.input}")
     for video_path in inputs:
         process_clip(video_path, Path(args.out_dir),
-                     Path(args.model) if args.model else None)
+                     Path(args.model) if args.model else None,
+                     takeaway_frame=args.takeaway_frame,
+                     takeaway_time_s=args.takeaway_time)
 
 
 if __name__ == "__main__":

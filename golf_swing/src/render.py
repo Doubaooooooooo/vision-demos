@@ -57,7 +57,7 @@ def render_frame(frame, lm, width, height, frame_idx, analysis, hand_trail):
     _draw_skeleton(out, lm, width, height)
     _draw_trail(out, hand_trail, cfg.TRAIL_COLOR)
     _text(out, f"Phase: {phase}", (12, 34))
-    tempo = analysis["tempo_ratio"]
+    tempo = analysis.get("tempo_display") or analysis["tempo_ratio"]
     tempo_s = f"Tempo {tempo}:1" if tempo else "Tempo --"
     _text(out, f"{tempo_s}  (back {analysis['backswing_s']}s / down "
                f"{analysis['downswing_s']}s)", (12, 66), scale=0.55)
@@ -79,6 +79,14 @@ def render_frame(frame, lm, width, height, frame_idx, analysis, hand_trail):
         if frame_idx >= analysis["events"][ev]:
             cv2.circle(out, (x, y0 + cfg.TIMELINE_HEIGHT // 2), 3,
                        (0, 200, 255), -1)
+    # Takeaway tick (green): the verified backswing start, distinct from
+    # the address tick — the address pose is stance, not the swing start.
+    if analysis.get("takeaway_frame") is not None:
+        x = int(analysis["takeaway_frame"] / max(1, n - 1) * (width - 4)) + 2
+        cv2.line(out, (x, y0 + 2), (x, height - 2), (0, 255, 0), 2)
+        if frame_idx >= analysis["takeaway_frame"]:
+            cv2.circle(out, (x, y0 + cfg.TIMELINE_HEIGHT // 2), 3,
+                       (0, 255, 0), -1)
     # Progress line.
     px = int(frame_idx / max(1, n - 1) * width)
     cv2.line(out, (px, y0), (px, height), (255, 255, 255), 1)
