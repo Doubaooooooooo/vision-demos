@@ -1,0 +1,7 @@
+# golf_swing v1 environment: local MediaPipe pose, no API key.
+# ffmpeg is a system dependency and is not installable here.
+#   python3 -m venv .venv-golf-swing
+#   .venv-golf-swing/bin/pip install -r environment.yml
+opencv-python-headless>=4.9
+numpy>=1.26
+mediapipe>=1.0
