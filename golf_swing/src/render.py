@@ -87,17 +87,26 @@ def _draw_clubhead_trail(frame, trail, frame_idx):
     # Current head marker: white-ringed magenta dot + label. Suppressed
     # inside the fast-downswing blur gap: a marker there would claim a
     # position the video does not show. The dotted bridge stays.
+    # v2: simulated heads (and low/inferred anchors) get a HOLLOW marker —
+    # white ring, no magenta fill — visually distinct from a measured head.
+    # The gap suppression only applies to v1 (blur_gap set); v2 sets
+    # blur_gap to [0, -1] so its simulated heads draw hollow instead.
     gap = trail.get("blur_gap") or [0, -1]
     if frame_idx in pos and not (gap[0] <= frame_idx <= gap[1]):
         p = pos[frame_idx]
+        status = (trail.get("status") or {}).get(frame_idx, "")
+        is_sim = (trail.get("simulated") or {}).get(frame_idx, False) \
+            or status in ("simulated", "low", "inferred")
+        label = "CLUBHEAD (sim)" if status == "simulated" else "CLUBHEAD"
         cv2.circle(frame, p, 9, (255, 255, 255), 2, cv2.LINE_AA)
-        cv2.circle(frame, p, 5, CLUBHEAD_COLOR, -1, cv2.LINE_AA)
+        if not is_sim:
+            cv2.circle(frame, p, 5, CLUBHEAD_COLOR, -1, cv2.LINE_AA)
         # Label flips to the left of the marker near the right edge.
         w = frame.shape[1]
-        lx = p[0] + 12 if p[0] < w - 120 else p[0] - 108
-        cv2.putText(frame, "CLUBHEAD", (lx, p[1] - 10),
+        lx = p[0] + 12 if p[0] < w - 140 else p[0] - 128
+        cv2.putText(frame, label, (lx, p[1] - 10),
                     _FONT, 0.45, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(frame, "CLUBHEAD", (lx, p[1] - 10),
+        cv2.putText(frame, label, (lx, p[1] - 10),
                     _FONT, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
 
 
@@ -133,8 +142,13 @@ def render_frame(frame, lm, width, height, frame_idx, analysis, hand_trail,
     _text(out, f"Spine 2D: {spine_s} deg", (12, 90), scale=0.45)
     # Clubhead legend (only when a clubhead trail is being drawn).
     if clubhead_trail is not None:
-        _text(out, "Clubhead magenta: solid=measured, dotted=bridged",
-              (12, height - cfg.TIMELINE_HEIGHT - 8), scale=0.42)
+        if clubhead_trail.get("version") == 2:
+            _text(out, "Clubhead magenta: solid=measured, dotted=simulated,"
+                       " hollow=simulated head",
+                  (12, height - cfg.TIMELINE_HEIGHT - 8), scale=0.42)
+        else:
+            _text(out, "Clubhead magenta: solid=measured, dotted=bridged",
+                  (12, height - cfg.TIMELINE_HEIGHT - 8), scale=0.42)
     # Bottom timeline: ticks for the 8 events.
     y0 = height - cfg.TIMELINE_HEIGHT
     cv2.rectangle(out, (0, y0), (width, height), (20, 20, 20), -1)

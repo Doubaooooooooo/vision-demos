@@ -103,7 +103,7 @@ def ffmpeg_mux_audio(video_no_audio: Path, source: Path, out: Path):
 
 def process_clip(video_path: Path, out_dir: Path, model_path=None,
                    takeaway_frame=None, takeaway_time_s=None,
-                   with_clubhead=False):
+                   with_clubhead=False, with_clubhead_v2=False):
     t0 = time.time()
     log_lines: list[str] = []
     stem = video_path.stem
@@ -136,7 +136,19 @@ def process_clip(video_path: Path, out_dir: Path, model_path=None,
     # Clubhead trail (face-on clip only): eye-verified anchors + bridged
     # interpolation; see src/clubhead.py for the honesty notes.
     clubhead_trail = None
-    if with_clubhead:
+    clubhead_trail_v2 = None
+    if with_clubhead_v2:
+        clubhead_trail = clubhead_mod.build_trail_v2(n_frames, wrist_pts)
+        clubhead_trail_v2 = clubhead_trail
+        n_meas = sum(1 for v in clubhead_trail["status"].values()
+                     if v == "measured")
+        n_sim = sum(1 for v in clubhead_trail["status"].values()
+                    if v == "simulated")
+        log(f"[{stem}] clubhead v2: {n_meas} measured / {n_sim} simulated / "
+            f"{len(clubhead_trail['positions']) - n_meas - n_sim} other "
+            f"frames f{clubhead_trail['first_frame']}-"
+            f"{clubhead_trail['last_frame']}", log_lines)
+    elif with_clubhead:
         clubhead_trail = clubhead_mod.build_trail(n_frames)
         log(f"[{stem}] clubhead: {sum(1 for v in clubhead_trail['measured'].values() if v)}"
             f" measured / {sum(1 for v in clubhead_trail['measured'].values() if not v)}"
@@ -207,7 +219,84 @@ def process_clip(video_path: Path, out_dir: Path, model_path=None,
     }
     (clip_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
     (clip_dir / "run.log").write_text("\n".join(log_lines) + "\n")
-    if clubhead_trail is not None:
+    if clubhead_trail_v2 is not None:
+        tr = clubhead_trail_v2
+        model_cmp = None
+        if all(wrist_pts[f] is not None
+               for f in range(tr["first_frame"], tr["last_frame"] + 1)):
+            model_cmp = clubhead_mod.model_comparison_v2(wrist_pts)
+        ch2 = {
+            "clip": video_path.name,
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "version": 2,
+            "method": (
+                "Stage 1: frame-by-frame re-search of the downswing gap "
+                "f182-f192 with the wrist + club-length constraint "
+                "(visual grounding cross-checked against the shaft line, "
+                "the annulus around the wrist, and angle continuity; "
+                "grounding validated to 10-24 px on the known f181/f184 "
+                "anchors). Found f182/f183 as new anchors; f184/f185 "
+                "updated; f186/f188/f191/f192 not found; f187 kept only "
+                "as a LOW streak-end anchor (v1 f187 anchor removed — it "
+                "was the hand blur). Stage 2: monotone-cubic (PCHIP) arc "
+                "through the anchors for the remaining gap frames; the "
+                "rigid-rod and body-centre-circle models were checked and "
+                "rejected (see model_comparison). Simulated frames are "
+                "drawn dotted with a hollow head marker."
+            ),
+            "first_frame": tr["first_frame"],
+            "last_frame": tr["last_frame"],
+            "simulated_frames": tr["simulated_frames"],
+            "n_frames": len(tr["positions"]),
+            "n_measured": sum(1 for v in tr["status"].values()
+                              if v == "measured"),
+            "n_low": sum(1 for v in tr["status"].values() if v == "low"),
+            "n_simulated": sum(1 for v in tr["status"].values()
+                               if v == "simulated"),
+            "n_bridged": sum(1 for v in tr["status"].values()
+                             if v == "bridged"),
+            "n_solid_drawn": sum(1 for v in tr["solid"].values() if v),
+            "n_dotted_drawn": sum(1 for v in tr["solid"].values() if not v),
+            "per_frame": [
+                {
+                    "frame": f,
+                    "x": tr["positions"][f][0],
+                    "y": tr["positions"][f][1],
+                    "status": tr["status"][f],
+                    "confidence": tr["confidence"][f],
+                    "wrist": ([round(float(wrist_pts[f][0])),
+                               round(float(wrist_pts[f][1]))]
+                              if wrist_pts[f] is not None else None),
+                    "wrist_dist_px": tr["wrist_dist"].get(f),
+                    "shaft_angle_deg": tr["shaft_angle"].get(f),
+                    "drawn_solid": tr["solid"][f],
+                }
+                for f in sorted(tr["positions"])
+            ],
+            "anchors": tr["anchors"],
+            "per_phase": clubhead_mod.phase_counts(
+                tr,
+                {**analysis["events"],
+                 "takeaway_frame": analysis.get("takeaway_frame")},
+            ),
+            "model_comparison": model_cmp,
+            "caveats": [
+                "Clubhead positions are 2D image-plane pixels, not 3D.",
+                "Only high/medium anchors are measured sightings. Low "
+                "anchors are streak-end reads; f190 is inferred from the "
+                "ball launch point; f186/f188/f191/f192 are simulated "
+                "(PCHIP arc), not measured — do not use them for "
+                "clubhead speed or downswing-plane numbers.",
+                "The simulated downswing arc relies on the club-length "
+                "foreshortening dip (wrist-head distance ~104-149 px "
+                "mid-gap, shaft near camera-perpendicular). The f186 dip "
+                "to 104 px is the least-constrained number in the trail.",
+                "No ball trajectory is drawn in this video: the face-on "
+                "ball had 0 confirmed flight points.",
+            ],
+        }
+        (clip_dir / "clubhead_v2.json").write_text(json.dumps(ch2, indent=2))
+    if clubhead_trail is not None and clubhead_trail_v2 is None:
         ch = {
             "clip": video_path.name,
             "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -296,6 +385,10 @@ def main():
     ap.add_argument("--clubhead", action="store_true",
                     help="draw the clubhead trail (src/clubhead.py anchors; "
                          "face-on clip only)")
+    ap.add_argument("--clubhead-v2", action="store_true",
+                    help="draw the v2 clubhead trail: PCHIP downswing arc, "
+                         "simulated gap frames dotted with hollow markers "
+                         "(face-on clip only)")
     args = ap.parse_args()
     inputs = collect_inputs(Path(args.input))
     if not inputs:
@@ -305,7 +398,8 @@ def main():
                      Path(args.model) if args.model else None,
                      takeaway_frame=args.takeaway_frame,
                      takeaway_time_s=args.takeaway_time,
-                     with_clubhead=args.clubhead)
+                     with_clubhead=args.clubhead,
+                     with_clubhead_v2=args.clubhead_v2)
 
 
 if __name__ == "__main__":
